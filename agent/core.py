@@ -1,4 +1,5 @@
 
+import ast
 import re
 
 from tools.workspace import list_workspace_files, read_workspace_file
@@ -23,6 +24,40 @@ def inspect_file(relative_path: str):
     }
 
 
+def _source_has_false_assignment(source: str, variable_name: str) -> bool:
+    """Check Python syntax for a dictionary entry explicitly set to False."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+
+        for key, value in zip(node.keys, node.values):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == variable_name
+                and isinstance(value, ast.Constant)
+                and value.value is False
+            ):
+                return True
+
+    return False
+
+
+def _has_calendar_validation(source: str) -> bool:
+    """Look for common calendar-aware date parsing calls in Python source."""
+    patterns = (
+        r"\bdate\s*\.\s*fromisoformat\s*\(",
+        r"\bdatetime\s*\.\s*fromisoformat\s*\(",
+        r"\bdatetime\s*\.\s*strptime\s*\(",
+        r"\bstrptime\s*\(",
+    )
+    return any(re.search(pattern, source) for pattern in patterns)
+
+
 def build_assignment_audit():
     """Create source-based findings without modifying assignment files."""
     report = read_assignment_file("reports/final_report.md")
@@ -39,79 +74,111 @@ def build_assignment_audit():
             "recommendation": recommendation,
         })
 
-    if "not independently verified classification accuracy" in report:
+    report_lower = report.lower()
+
+    if (
+        "classification accuracy" in report_lower
+        and any(
+            phrase in report_lower
+            for phrase in (
+                "not independently verified",
+                "not verified",
+                "has not been verified",
+                "unverified",
+            )
+        )
+    ):
         add_finding(
             "HIGH",
             "Classification accuracy remains unverified",
-            "The report distinguishes workflow coverage from independently "
-            "verified classification accuracy.",
+            "The report discusses classification accuracy but also indicates "
+            "that it has not been independently verified.",
             "Create a manually labelled evaluation set and report "
             "per-category precision, recall, and confusion cases.",
         )
 
-    if "Only **three sessions**" in report:
+    limited_ground_truth = (
+        re.search(r"\bthree sessions\b", report_lower)
+        or re.search(r"\b3 sessions\b", report_lower)
+    )
+    mentions_overlap = (
+        "ground-truth" in report_lower
+        or "ground truth" in report_lower
+    )
+
+    if limited_ground_truth and mentions_overlap:
         add_finding(
             "HIGH",
-            "Ground-truth coverage is limited",
-            "The report says only three sessions overlap the available "
-            "ground-truth and raw-event coverage.",
-            "Evaluate additional complete sessions before claiming "
-            "generalizable boundary-detection performance.",
+            "Ground-truth coverage may be limited",
+            "The report mentions three sessions in its ground-truth "
+            "discussion. Confirm the overlap count and coverage before "
+            "generalizing performance.",
+            "Evaluate additional complete sessions and clearly state "
+            "the sample size and limitations.",
+        )
+
+    if _source_has_false_assignment(implementation, "automatic_approval"):
+        add_finding(
+            "HIGH",
+            "Human control is preserved in the inspected implementation",
+            "A Python dictionary explicitly sets automatic_approval to False.",
+            "Retain this safeguard and test it across workflows and "
+            "error paths. This source check alone does not prove every "
+            "execution path is safe.",
+        )
+
+    if re.search(
+        r"\btest_human_confirmation_always_required\b",
+        tests,
+    ):
+        add_finding(
+            "MEDIUM",
+            "Human-confirmation regression test is present",
+            "The test source contains a test named "
+            "test_human_confirmation_always_required.",
+            "Extend coverage to malformed, contradictory, and incomplete "
+            "inputs across all workflow families.",
         )
 
     if (
-        "automatic_approval" in implementation
-        and re.search(r'"automatic_approval"\s*:\s*False', implementation)
+        "time-saving percentage" in report_lower
+        or "handling time" in report_lower
+        or "business impact" in report_lower
+    ) and any(
+        phrase in report_lower
+        for phrase in (
+            "not measured",
+            "no defensible",
+            "has not been measured",
+            "not yet measured",
+        )
     ):
         add_finding(
             "HIGH",
-            "Human control is preserved",
-            "The implementation explicitly returns automatic_approval=False.",
-            "Retain this safeguard and test it across all workflows and "
-            "error paths.",
-        )
-
-    if "test_human_confirmation_always_required" in tests:
-        add_finding(
-            "MEDIUM",
-            "Safety regression tests exist",
-            "The existing tests include a human-confirmation safeguard check.",
-            "Extend coverage to malformed, contradictory, and incomplete "
-            "inputs across all eight workflow families.",
-        )
-
-    if "No defensible time-saving percentage" in report:
-        add_finding(
-            "HIGH",
-            "Business impact has not been measured",
-            "The report says baseline handling time and reviewer correction "
-            "time have not been measured.",
+            "Business impact needs measured evidence",
+            "The report discusses handling time, time savings, or business "
+            "impact alongside a statement that the evidence is not measured.",
             "Run a controlled manual-versus-assisted evaluation measuring "
-            "handling time, corrections, and exception rates.",
+            "handling time, reviewer corrections, and exception rates.",
         )
 
-    # Inspect the real source for calendar-aware date validation.
     has_date_extraction = (
         "due_or_effective_date" in implementation
-        or "date" in implementation.lower()
-    )
-    has_calendar_validation = (
-        "date.fromisoformat" in implementation
-        or "datetime.strptime" in implementation
-        or "datetime.fromisoformat" in implementation
+        or re.search(r"\bdate\b", implementation.lower()) is not None
     )
 
-    if has_date_extraction and not has_calendar_validation:
+    if has_date_extraction and not _has_calendar_validation(implementation):
         add_finding(
             "HIGH",
             "Extracted dates lack calendar-aware validation",
-            "The source extracts date fields but no calendar-aware date "
-            "parser was found in the implementation.",
+            "The inspected implementation references date-related fields "
+            "but contains no recognized calendar-aware parsing call.",
             "Validate extracted dates with calendar-aware parsing and flag "
-            "impossible dates for human review.",
+            "impossible dates for human review. Review the code manually "
+            "because this check recognizes common patterns, not every "
+            "possible validation implementation.",
         )
 
-    # Demonstrate that the agent's date validator handles edge cases.
     date_checks = {
         "valid_date": is_valid_iso_date("2026-07-14"),
         "impossible_month_day": is_valid_iso_date("2026-99-99"),
