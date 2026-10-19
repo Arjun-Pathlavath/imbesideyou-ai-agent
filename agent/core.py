@@ -1,6 +1,8 @@
 
 import ast
+import json
 import re
+from pathlib import Path
 
 from tools.workspace import list_workspace_files, read_workspace_file
 from tools.assignment_inspector import (
@@ -127,10 +129,7 @@ def build_assignment_audit():
             "execution path is safe.",
         )
 
-    if re.search(
-        r"\btest_human_confirmation_always_required\b",
-        tests,
-    ):
+    if re.search(r"\btest_human_confirmation_always_required\b", tests):
         add_finding(
             "MEDIUM",
             "Human-confirmation regression test is present",
@@ -174,9 +173,8 @@ def build_assignment_audit():
             "The inspected implementation references date-related fields "
             "but contains no recognized calendar-aware parsing call.",
             "Validate extracted dates with calendar-aware parsing and flag "
-            "impossible dates for human review. Review the code manually "
-            "because this check recognizes common patterns, not every "
-            "possible validation implementation.",
+            "impossible dates for human review. This source check recognizes "
+            "common patterns, not every possible implementation.",
         )
 
     date_checks = {
@@ -198,6 +196,26 @@ def build_assignment_audit():
     }
 
 
+def export_audit_json(audit, output_path="data/assignment_audit.json"):
+    """Export audit results to JSON inside the agent workspace only."""
+    workspace_root = Path(__file__).resolve().parent.parent
+    destination = (workspace_root / output_path).resolve()
+
+    if destination != workspace_root and workspace_root not in destination.parents:
+        raise ValueError("Export outside the agent workspace is not allowed.")
+
+    if destination.suffix.lower() != ".json":
+        raise ValueError("Audit report must use a .json extension.")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    with destination.open("w", encoding="utf-8") as file:
+        json.dump(audit, file, indent=2, ensure_ascii=False)
+        file.write("\n")
+
+    return destination
+
+
 def run_agent():
     audit = build_assignment_audit()
 
@@ -214,7 +232,9 @@ def run_agent():
     for check, result in audit["date_validator_checks"].items():
         print(f"{check}: {result}")
 
-    print("\nAudit complete. Original assignment files were only read.")
+    report_path = export_audit_json(audit)
+    print(f"\nJSON report saved to: {report_path}")
+    print("Audit complete. Original assignment files were only read.")
 
 
 if __name__ == "__main__":
